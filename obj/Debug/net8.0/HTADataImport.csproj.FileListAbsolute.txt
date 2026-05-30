@@ -44,6 +44,7 @@ G:\Projects\HTADataImportTool\HTADataImport\obj\Debug\net8.0\HTADataImport.Gener
 G:\Projects\HTADataImportTool\HTADataImport\obj\Debug\net8.0\HTADataImport.AssemblyInfoInputs.cache
 G:\Projects\HTADataImportTool\HTADataImport\obj\Debug\net8.0\HTADataImport.AssemblyInfo.cs
 G:\Projects\HTADataImportTool\HTADataImport\obj\Debug\net8.0\HTADataImport.csproj.CoreCompileInputs.cache
+G:\Projects\HTADataImportTool\HTADataImport\obj\Debug\net8.0\HTADataImport.sourcelink.json
 G:\Projects\HTADataImportTool\HTADataImport\obj\Debug\net8.0\HTADataI.85FA2C32.Up2Date
 G:\Projects\HTADataImportTool\HTADataImport\obj\Debug\net8.0\HTADataImport.dll
 G:\Projects\HTADataImportTool\HTADataImport\obj\Debug\net8.0\refint\HTADataImport.dll
