@@ -54,26 +54,31 @@ namespace HTADataImport
 
                 // Show menu
                 Console.WriteLine("Select operation:");
-                Console.WriteLine("1. Run Import (TempAllClientInfo → Customer & Ticket)");
-                Console.WriteLine("2. Run Post-Import Updates (Create mappings & update CreatedOnUtc)");
+                Console.WriteLine("1. Setup Master Data (Must run BEFORE import)");
+                Console.WriteLine("2. Run Import (Garner Tables → Customer & Ticket)");
+                Console.WriteLine("3. Run Post-Import Updates (Create mappings & update CreatedOnUtc)");
                 Console.WriteLine();
-                Console.Write("Enter choice (1 or 2): ");
+                Console.Write("Enter choice (1, 2, or 3): ");
                 
                 var choice = Console.ReadLine()?.Trim();
                 Console.WriteLine();
 
                 if (choice == "1")
                 {
-                    RunImport(config);
+                    RunMasterDataSetup(config);
                 }
                 else if (choice == "2")
+                {
+                    RunImport(config);
+                }
+                else if (choice == "3")
                 {
                     RunPostImportUpdates(config);
                 }
                 else
                 {
                     Console.ForegroundColor = ConsoleColor.Red;
-                    Console.WriteLine("✗ Invalid choice. Please enter 1 or 2.");
+                    Console.WriteLine("✗ Invalid choice. Please enter 1, 2, or 3.");
                     Console.ResetColor();
                 }
             }
@@ -90,15 +95,164 @@ namespace HTADataImport
             Console.ReadKey();
         }
 
+        private static void RunMasterDataSetup(AppSettings config)
+        {
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("═══════════════════════════════════");
+            Console.WriteLine("   Master Data Setup");
+            Console.WriteLine("═══════════════════════════════════");
+            Console.ResetColor();
+            Console.WriteLine();
+            Console.WriteLine("This will setup master data from LegalSharkDB:");
+            Console.WriteLine("  • Sources");
+            Console.WriteLine("  • Court Jurisdictions");
+            Console.WriteLine("  • Court Locations");
+            Console.WriteLine("  • Area of Practice");
+            Console.WriteLine("  • Offence Types");
+            Console.WriteLine("  • Officers");
+            Console.WriteLine("  • Dispositions");
+            Console.WriteLine("  • Billing Companies");
+            Console.WriteLine();
+            
+            // Ask about clearing existing data
+            Console.Write("Clear existing master data for StoreId {0} before setup? (y/n): ", config.StoreId);
+            var clearResponse = Console.ReadLine()?.Trim().ToLower();
+            var clearExisting = clearResponse == "y" || clearResponse == "yes";
+            Console.WriteLine();
+
+            // Ask about Disposition cleanup
+            var clearDispositions = false;
+            if (clearExisting)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("⚠ WARNING: Disposition table is global (no StoreId)");
+                Console.ResetColor();
+                Console.Write("Clear ALL dispositions globally? (y/n): ");
+                var dispResponse = Console.ReadLine()?.Trim().ToLower();
+                clearDispositions = dispResponse == "y" || dispResponse == "yes";
+                Console.WriteLine();
+            }
+
+            if (config.DryRun)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine("⚠ DRY RUN MODE ACTIVE - No data will actually be created!");
+                Console.ResetColor();
+            }
+
+            if (clearExisting && !config.DryRun)
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("⚠ WARNING: This will DELETE existing master data for StoreId {0}!", config.StoreId);
+                Console.WriteLine("   (Sources, Courts, Offences, Officers, BillingCompanies)");
+                Console.ResetColor();
+            }
+
+            Console.WriteLine("\nPress ENTER to start master data setup or ESC to cancel...");
+            var key = Console.ReadKey(true);
+            if (key.Key == ConsoleKey.Escape)
+            {
+                Console.WriteLine("Master data setup cancelled.");
+                return;
+            }
+
+            Console.WriteLine();
+
+            try
+            {
+                // Create master data setup
+                var setup = new HTAMasterDataSetup(
+                    connectionString: config.ConnectionString,
+                    sourceDatabaseName: "LegalSharkDB",
+                    storeId: config.StoreId,
+                    dryRun: config.DryRun,
+                    clearExistingStoreMasterData: clearExisting,
+                    clearGlobalDispositionData: clearDispositions
+                );
+
+                // Run setup
+                var result = setup.SetupMasterData();
+
+                // Display results
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.Green;
+                Console.WriteLine("═══════════════════════════════════");
+                Console.WriteLine("   Master Data Setup Complete!");
+                Console.WriteLine("═══════════════════════════════════");
+                Console.ResetColor();
+                Console.WriteLine($"✓ Sources processed: {result.SourcesProcessed}");
+                Console.WriteLine($"✓ Courts processed: {result.CourtsProcessed}");
+                Console.WriteLine($"✓ Offences processed: {result.OffencesProcessed}");
+                Console.WriteLine($"✓ Officers processed: {result.OfficersProcessed}");
+                Console.WriteLine($"✓ Dispositions processed: {result.DispositionsProcessed}");
+                Console.WriteLine($"✓ BillingCompanies processed: {result.BillingCompaniesProcessed}");
+                
+                if (clearExisting)
+                {
+                    Console.WriteLine($"✓ Rows deleted: {result.RowsDeleted}");
+                }
+                
+                Console.WriteLine($"⚠ Warnings: {result.Warnings.Count}");
+
+                if (result.Warnings.Count > 0)
+                {
+                    Console.WriteLine("\nWarnings:");
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    foreach (var warning in result.Warnings)
+                    {
+                        Console.WriteLine($"  ⚠ {warning}");
+                    }
+                    Console.ResetColor();
+                }
+
+                if (config.DryRun)
+                {
+                    Console.WriteLine();
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine("⚠ DRY RUN MODE - No data was actually created!");
+                    Console.WriteLine("Set 'DryRun': false in appsettings.json to perform actual setup.");
+                    Console.ResetColor();
+                }
+                else
+                {
+                    Console.WriteLine();
+                    Console.ForegroundColor = ConsoleColor.Green;
+                    Console.WriteLine("✓ Master data successfully created for StoreId {0}!", config.StoreId);
+                    Console.WriteLine("\nYou can now run the import (Option 2).");
+                    Console.ResetColor();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine();
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"✗ ERROR: Master data setup failed!");
+                Console.WriteLine($"  {ex.Message}");
+                Console.ResetColor();
+                
+                if (ex.InnerException != null)
+                {
+                    Console.WriteLine($"\nInner Exception: {ex.InnerException.Message}");
+                }
+            }
+        }
+
         private static void RunImport(AppSettings config)
         {
             // Display source info
             Console.ForegroundColor = ConsoleColor.Gray;
-            Console.WriteLine($"Source: TempAllClientInfo table");
+            Console.WriteLine($"Source: LegalSharkDB (GarnertblClient + GarnertblTicket + GarnertblTicketType)");
             if (!string.IsNullOrEmpty(config.FilterCsvPath))
             {
                 Console.WriteLine($"Filter: {config.FilterCsvPath} (importing selected tickets only)");
             }
+            Console.ResetColor();
+            Console.WriteLine();
+            
+            // Check if history tables exist reminder
+            Console.ForegroundColor = ConsoleColor.Cyan;
+            Console.WriteLine("💡 TIP: For history tracking (Disposition, Offence, CourtDate),");
+            Console.WriteLine("   run History_Tables_Setup.sql before import (optional).");
             Console.ResetColor();
             Console.WriteLine();
 

@@ -25,7 +25,6 @@ namespace HTADataImport
         private Dictionary<string, int> _officerCache = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);  // BadgeNumber -> Id
         private int? _canadaCountryId = null;
         private int? _defaultSourceId = null;
-        private int? _clientRoleId = null;
         
         // Track unmapped items for reporting
         private HashSet<string> _unmappedCourts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -56,7 +55,7 @@ namespace HTADataImport
                 }
 
                 // Step 1: Read data from SQL Server table
-                Console.WriteLine("📄 Reading data from TempAllClientInfo table...");
+                Console.WriteLine("📄 Reading data from Garner tables (GarnertblClient + GarnertblTicket + GarnertblTicketType)...");
                 var records = ReadDataFromTable();
                 Console.WriteLine($"   ✓ Read {records.Count} records from database\n");
 
@@ -158,19 +157,85 @@ namespace HTADataImport
                 if (_ticketFilter != null && _ticketFilter.Count > 0)
                 {
                     var quotedTickets = string.Join(",", _ticketFilter.Select(t => $"'{t.Replace("'", "''")}'")); 
-                    whereClause = $" WHERE POT IN ({quotedTickets})";
+                    whereClause = $" WHERE T.POT IN ({quotedTickets})";
                 }
 
+                // Query from Garner original tables with proper joins
+                // Using cross-database query: GarnerTempDB tables → LegalShark30May26DB tables
                 var sql = $@"SELECT 
-                    IntakeDate, [First Name], Lastname, Address, City, Prov, Postal, 
-                    ynDiscrete, homephone, businessphone, Ext, Cell, Fax, Gender, 
-                    tblClient_Notes, POT, ICON, TicketDate, Intake, SectionNumber, 
-                    tblOffenseWording_Description, SpeedingGoing, SpeedingInA, BadgeNumber, 
-                    CourtName, [1stApp], Rm, Time, tblDisposition_Description, Name, 
-                    tblGuarantee_Description, WePay, HePays, Fee, GST, Total, 
-                    TotalPayments, Balance, Language, SpecialInstructions, 
-                    tblTicket_Notes, DateDisclosureRequested, DateDisclosureReceived
-                FROM [dbo].[TempAllClientInfo]{whereClause}";
+                    -- Original IDs for future mapping
+                    T.pkTicketID AS HTATicketId,
+                    T.fkClientID AS HTAClientId,
+                    C.pkClientID AS ClientPkId,
+                    
+                    -- Client Information from GarnertblClient
+                    C.IntakeDate,
+                    C.First_Name AS FirstName,
+                    C.Lastname,
+                    C.Address,
+                    C.City,
+                    C.Prov,
+                    C.Postal,
+                    C.ynDiscrete,
+                    C.homephone,
+                    C.businessphone,
+                    C.Ext,
+                    C.Cell,
+                    C.Fax,
+                    C.fkGenderID AS Gender,
+                    C.Notes AS ClientNotes,
+                    C.fkLanguageID AS Language,
+                    C.kBillingCompanyID AS BillingCompanyId,
+                    C.fkSourceID AS SourceId,
+                    SRC.[Source] AS SourceName,
+                    
+                    -- Ticket Information from GarnertblTicket
+                    T.POT,
+                    T.fkIconID AS ICON,
+                    T.TicketDate,
+                    T.Intake,
+                    T.fkOffenseSectionID AS SectionNumber,
+                    T.fkOffenseWordingID AS OffenseWording,
+                    T.SpeedingGoing,
+                    T.SpeedingInA,
+                    T.fkGuiltyOffenseSectionID AS GuiltyOffenseSectionId,
+                    T.fkGuiltyOffenseWordingID AS GuiltyOffenseWordingId,
+                    T.GuiltySpeedingGoing,
+                    T.GuiltySpeedingInA,
+                    T.fkOfficerID AS BadgeNumber,
+                    T.fkCourtID AS CourtName,
+                    T.[1stApp] AS FirstApp,
+                    T.Rm,
+                    T.Time,
+                    T.Disposition,
+                    T.fkAgentAppearingID AS Name,
+                    T.SpecialInstructions,
+                    T.Notes AS TicketNotes,
+                    T.DateDisclosureRequested,
+                    T.DateDisclosureReceived,
+                    
+                    -- Offense Points from GarnertblOffenseSection
+                    OS.Points AS OffensePoints,
+                    
+                    -- Ticket Type from GarnertblTicketType
+                    TT.Description AS TicketType,
+                    
+                    -- Financial Information from GarnertblTicket
+                    T.fkGuaranteeID AS Guarantee,
+                    T.WePay,
+                    T.HePays AS Fine,
+                    T.Fee,
+                    T.BaseGST AS GST,
+                    T.BaseTotal AS Total,
+                    T.TotalPayments,
+                    T.Balance
+                    
+                FROM [LegalSharkDB].[dbo].[GarnertblTicket] T
+                LEFT JOIN [LegalSharkDB].[dbo].[GarnertblClient] C ON T.fkClientID = C.pkClientID
+                LEFT JOIN [LegalSharkDB].[dbo].[GarnertblTicketType] TT ON T.fkTicketTypeID = TT.pkTicketTypeID
+                LEFT JOIN [LegalSharkDB].[dbo].[GarnertblOffenseSection] OS ON T.fkOffenseSectionID = OS.pkOffenseSectionID
+                LEFT JOIN [LegalSharkDB].[dbo].[GarnertblSource] SRC ON C.fkSourceID = SRC.pkSourceID{whereClause}
+                ORDER BY C.IntakeDate, T.POT";
 
                 using var cmd = new SqlCommand(sql, connection);
                 using var reader = cmd.ExecuteReader();
@@ -179,8 +244,13 @@ namespace HTADataImport
                 {
                     var record = new HTARecord
                     {
+                        // Original IDs for mapping
+                        HTATicketId = GetSafeString(reader, "HTATicketId"),
+                        HTAClientId = GetSafeString(reader, "HTAClientId"),
+                        
+                        // Client Information
                         IntakeDate = GetSafeString(reader, "IntakeDate"),
-                        FirstName = GetSafeString(reader, "First Name"),
+                        FirstName = GetSafeString(reader, "FirstName"),
                         LastName = GetSafeString(reader, "Lastname"),
                         Address = GetSafeString(reader, "Address"),
                         City = GetSafeString(reader, "City"),
@@ -193,35 +263,48 @@ namespace HTADataImport
                         Cell = GetSafeString(reader, "Cell"),
                         Fax = GetSafeString(reader, "Fax"),
                         Gender = GetSafeString(reader, "Gender"),
-                        Notes = GetSafeString(reader, "tblClient_Notes"),
+                        Notes = GetSafeString(reader, "ClientNotes"),
+                        Language = GetSafeString(reader, "Language"),
+                        SourceId = GetSafeString(reader, "SourceId"),
+                        SourceName = GetSafeString(reader, "SourceName"),
+                        
+                        // Ticket Information
                         POT = GetSafeString(reader, "POT"),
                         ICON = GetSafeString(reader, "ICON"),
                         TicketDate = GetSafeString(reader, "TicketDate"),
                         Intake = GetSafeString(reader, "Intake"),
                         SectionNumber = GetSafeString(reader, "SectionNumber"),
-                        OffenseWording = GetSafeString(reader, "tblOffenseWording_Description"),
+                        OffenseWording = GetSafeString(reader, "OffenseWording"),
                         SpeedingGoing = GetSafeString(reader, "SpeedingGoing"),
                         SpeedingInA = GetSafeString(reader, "SpeedingInA"),
+                        GuiltyOffenseSectionId = GetSafeString(reader, "GuiltyOffenseSectionId"),
+                        GuiltyOffenseWordingId = GetSafeString(reader, "GuiltyOffenseWordingId"),
+                        GuiltySpeedingGoing = GetSafeString(reader, "GuiltySpeedingGoing"),
+                        GuiltySpeedingInA = GetSafeString(reader, "GuiltySpeedingInA"),
+                        OffensePoints = GetSafeString(reader, "OffensePoints"),
                         BadgeNumber = GetSafeString(reader, "BadgeNumber"),
                         CourtName = GetSafeString(reader, "CourtName"),
-                        FirstApp = GetSafeString(reader, "1stApp"),
+                        BillingCompanyId = GetSafeString(reader, "BillingCompanyId"),
+                        FirstApp = GetSafeString(reader, "FirstApp"),
                         Rm = GetSafeString(reader, "Rm"),
                         Time = GetSafeString(reader, "Time"),
-                        Disposition = GetSafeString(reader, "tblDisposition_Description"),
+                        Disposition = GetSafeString(reader, "Disposition"),
                         Name = GetSafeString(reader, "Name"),
-                        Guarantee = GetSafeString(reader, "tblGuarantee_Description"),
+                        TicketType = GetSafeString(reader, "TicketType"),
+                        SpecialInstructions = GetSafeString(reader, "SpecialInstructions"),
+                        TicketNotes = GetSafeString(reader, "TicketNotes"),
+                        DateDisclosureRequested = GetSafeString(reader, "DateDisclosureRequested"),
+                        DateDisclosureReceived = GetSafeString(reader, "DateDisclosureReceived"),
+                        
+                        // Financial Information
+                        Guarantee = GetSafeString(reader, "Guarantee"),
                         WePay = GetSafeString(reader, "WePay"),
+                        Fine = GetSafeString(reader, "Fine"),
                         Fee = GetSafeString(reader, "Fee"),
                         Tax = GetSafeString(reader, "GST"),
                         Total = GetSafeString(reader, "Total"),
                         Paid = GetSafeString(reader, "TotalPayments"),
-                        Balance = GetSafeString(reader, "Balance"),
-                        Language = GetSafeString(reader, "Language"),
-                        SpecialInstructions = GetSafeString(reader, "SpecialInstructions"),
-                        TicketNotes = GetSafeString(reader, "tblTicket_Notes"),
-                        DateDisclosureRequested = GetSafeString(reader, "DateDisclosureRequested"),
-                        DateDisclosureReceived = GetSafeString(reader, "DateDisclosureReceived"),
-                        Fine = GetSafeString(reader, "HePays")  // HePays maps to Fine
+                        Balance = GetSafeString(reader, "Balance")
                     };
                     
                     records.Add(record);
@@ -287,7 +370,7 @@ namespace HTADataImport
                 // Load Canada Country ID
                 var countryCmd = new SqlCommand("SELECT TOP 1 Id FROM Country WHERE Name LIKE '%Canada%'", connection);
                 var countryResult = countryCmd.ExecuteScalar();
-                _canadaCountryId = countryResult != null ? (int)countryResult : (int?)null;
+                _canadaCountryId = countryResult != null ? Convert.ToInt32(countryResult) : (int?)null;
 
                 // Load State/Provinces for Canada
                 if (_canadaCountryId.HasValue)
@@ -297,7 +380,7 @@ namespace HTADataImport
                     {
                         while (stateReader.Read())
                         {
-                            var id = stateReader.GetInt32(0);
+                            var id = Convert.ToInt32(stateReader.GetValue(0));
                             var name = stateReader.GetString(1);
                             var abbr = stateReader.IsDBNull(2) ? null : stateReader.GetString(2);
                             
@@ -314,7 +397,7 @@ namespace HTADataImport
                 {
                     while (courtReader.Read())
                     {
-                        var id = courtReader.GetInt32(0);
+                        var id = Convert.ToInt32(courtReader.GetValue(0));
                         var name = courtReader.GetString(1);
                         var iconCode = courtReader.IsDBNull(2) ? null : courtReader.GetString(2);
                         // Note: CourtJurisdictionId at index 3 is available if needed
@@ -331,7 +414,7 @@ namespace HTADataImport
                 {
                     while (offenceReader.Read())
                     {
-                        var id = offenceReader.GetInt32(0);
+                        var id = Convert.ToInt32(offenceReader.GetValue(0));
                         var name = offenceReader.GetString(1);
                         var statute = offenceReader.IsDBNull(2) ? null : offenceReader.GetString(2);
                         
@@ -346,25 +429,25 @@ namespace HTADataImport
                     }
                 }
 
-                // Load Dispositions - use pkDispositionID as the actual ID
-                var dispositionCmd = new SqlCommand("SELECT pkDispositionID, Description FROM Disposition", connection);
+                // Load Dispositions - use ID (primary key) not pkDispositionID (source ID)
+                var dispositionCmd = new SqlCommand("SELECT ID, Description FROM Disposition", connection);
                 using (var dispositionReader = dispositionCmd.ExecuteReader())
                 {
                     while (dispositionReader.Read())
                     {
-                        var id = dispositionReader.GetInt32(0);
+                        var id = Convert.ToInt32(dispositionReader.GetValue(0));
                         var name = dispositionReader.GetString(1);
                         _dispositionCache[name] = id;
                     }
                 }
 
-                // Load Officers from the new Officer table (not HTAOfficer source table)
-                var officerCmd = new SqlCommand("SELECT Id, BadgeNumber FROM Officer WHERE BadgeNumber IS NOT NULL", connection);
+                // Load Officers from the new Officer table (filtered by StoreId)
+                var officerCmd = new SqlCommand($"SELECT Id, BadgeNumber FROM Officer WHERE StoreId = {_storeId} AND BadgeNumber IS NOT NULL AND IsActive = 1", connection);
                 using (var officerReader = officerCmd.ExecuteReader())
                 {
                     while (officerReader.Read())
                     {
-                        var id = officerReader.GetInt32(0);
+                        var id = Convert.ToInt32(officerReader.GetValue(0));
                         
                         // Check for NULL before reading BadgeNumber
                         if (!officerReader.IsDBNull(1))
@@ -383,7 +466,7 @@ namespace HTADataImport
                 var sourceResult = sourceCmd.ExecuteScalar();
                 if (sourceResult != null)
                 {
-                    _defaultSourceId = (int)sourceResult;
+                    _defaultSourceId = Convert.ToInt32(sourceResult);
                 }
                 else if (!_dryRun)
                 {
@@ -393,20 +476,7 @@ namespace HTADataImport
                         $"OUTPUT INSERTED.Id " +
                         $"VALUES ({_storeId}, 'Data Import', 'Records imported from legacy system', 1, GETUTCDATE())", 
                         connection);
-                    _defaultSourceId = (int)createSourceCmd.ExecuteScalar();
-                }
-
-                // Load Client role ID
-                var roleCmd = new SqlCommand("SELECT TOP 1 Id FROM CustomerRole WHERE Name = 'Client' OR Name = 'Clients' OR SystemName = 'Client' OR SystemName = 'Clients'", connection);
-                var roleResult = roleCmd.ExecuteScalar();
-                if (roleResult != null)
-                {
-                    _clientRoleId = (int)roleResult;
-                    Console.WriteLine($"   ✓ Found Client role (ID: {_clientRoleId})");
-                }
-                else
-                {
-                    Console.WriteLine("   ⚠ Warning: Client role not found in CustomerRole table");
+                    _defaultSourceId = Convert.ToInt32(createSourceCmd.ExecuteScalar());
                 }
             }
             catch (Exception ex)
@@ -557,7 +627,7 @@ namespace HTADataImport
                 cmd.Parameters.AddWithValue("@CreatedOnUtc", now);
                 cmd.Parameters.AddWithValue("@UpdatedOnUtc", now);
                 
-                var newId = (int)cmd.ExecuteScalar();
+                var newId = Convert.ToInt32(cmd.ExecuteScalar());
                 
                 // Add to cache for future lookups
                 _officerCache[badge] = newId;
@@ -567,6 +637,75 @@ namespace HTADataImport
             catch (Exception ex)
             {
                 Console.WriteLine($"   ⚠ Warning: Failed to create officer {badge}: {ex.Message}");
+                return null;
+            }
+        }
+
+        private int? GetOrCreateSourceId(SqlConnection connection, string sourceName)
+        {
+            if (string.IsNullOrWhiteSpace(sourceName))
+                return _defaultSourceId;
+            
+            try
+            {
+                // Check if source exists for this store
+                var checkSql = "SELECT TOP 1 Id FROM Source WHERE StoreId = @StoreId AND Name = @Name AND IsActive = 1";
+                using (var checkCmd = new SqlCommand(checkSql, connection))
+                {
+                    checkCmd.Parameters.AddWithValue("@StoreId", _storeId);
+                    checkCmd.Parameters.AddWithValue("@Name", sourceName);
+                    var result = checkCmd.ExecuteScalar();
+                    if (result != null)
+                        return Convert.ToInt32(result);
+                }
+                
+                // Source not found, return default
+                return _defaultSourceId;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"   ⚠ Warning: Failed to lookup source '{sourceName}': {ex.Message}");
+                return _defaultSourceId;
+            }
+        }
+
+        private int? GetBillingCompanyId(SqlConnection connection, string billingCompanySourceId)
+        {
+            if (string.IsNullOrWhiteSpace(billingCompanySourceId))
+                return null;
+            
+            try
+            {
+                // First, get the CompanyName from Garner database using the source ID
+                string? companyName = null;
+                var garnerSql = "SELECT TOP 1 CompanyName FROM [LegalSharkDB].[dbo].[GarnertblBillingCompany] WHERE pkBillingCompanyID = @SourceId";
+                using (var garnerCmd = new SqlCommand(garnerSql, connection))
+                {
+                    garnerCmd.Parameters.AddWithValue("@SourceId", billingCompanySourceId);
+                    var result = garnerCmd.ExecuteScalar();
+                    if (result != null && result != DBNull.Value)
+                        companyName = result.ToString()?.Trim();
+                }
+                
+                // If we found the company name, look it up in the destination BillingCompany table
+                if (!string.IsNullOrWhiteSpace(companyName))
+                {
+                    var lookupSql = "SELECT TOP 1 Id FROM BillingCompany WHERE StoreId = @StoreId AND LTRIM(RTRIM(CompanyName)) = LTRIM(RTRIM(@CompanyName)) AND IsActive = 1";
+                    using (var lookupCmd = new SqlCommand(lookupSql, connection))
+                    {
+                        lookupCmd.Parameters.AddWithValue("@StoreId", _storeId);
+                        lookupCmd.Parameters.AddWithValue("@CompanyName", companyName);
+                        var lookupResult = lookupCmd.ExecuteScalar();
+                        if (lookupResult != null)
+                            return Convert.ToInt32(lookupResult);
+                    }
+                }
+                
+                return null;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"   ⚠ Warning: Failed to lookup billing company '{billingCompanySourceId}': {ex.Message}");
                 return null;
             }
         }
@@ -688,7 +827,20 @@ namespace HTADataImport
             // Get foreign key IDs
             var stateProvinceId = GetStateProvinceId(record.Prov) ?? 0;
             var countryId = _canadaCountryId ?? 0;
+            
+            // Map source from Garner data, fallback to default source if not found
             var sourceId = _defaultSourceId;
+            if (!string.IsNullOrWhiteSpace(record.SourceName))
+            {
+                sourceId = GetOrCreateSourceId(connection, record.SourceName);
+            }
+            
+            // Map BillingCompanyId
+            int? billingCompanyId = null;
+            if (!string.IsNullOrWhiteSpace(record.BillingCompanyId))
+            {
+                billingCompanyId = GetBillingCompanyId(connection, record.BillingCompanyId);
+            }
 
             // Map our data to columns
             var dataMap = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
@@ -703,7 +855,11 @@ namespace HTADataImport
                 ["County"] = record.Prov,
                 ["ZipPostalCode"] = record.Postal,
                 ["Phone"] = GetPrimaryPhone(record),
+                ["HomePhone"] = record.HomePhone,
+                ["BusinessPhone"] = record.BusinessPhone,
+                ["CellPhone"] = record.Cell,
                 ["Fax"] = record.Fax,
+                ["BillingCompanyId"] = billingCompanyId,
                 ["ContactTypeId"] = 1,
                 ["EntityTypeId"] = 1,
                 ["RegisteredInStoreId"] = _storeId,
@@ -711,14 +867,15 @@ namespace HTADataImport
                 ["StateProvinceId"] = stateProvinceId,
                 ["SourceId"] = sourceId,
                 ["AdminComment"] = record.Notes,
-                ["CreatedOnUtc"] = DateTime.UtcNow,
+                ["CreatedOnUtc"] = ParseDate(record.IntakeDate) ?? DateTime.UtcNow,
                 ["LastActivityDateUtc"] = DateTime.UtcNow,
                 ["Active"] = true,
                 ["Deleted"] = false,
                 ["IsSystemAccount"] = false,
                 ["HstExempt"] = false,
                 ["ImportedFromHTA"] = true,
-                ["ImportedFromFirm"] = _firmName
+                ["ImportedFromFirm"] = _firmName,
+                ["HTAClientId"] = record.HTAClientId  // Original Garner Client ID for mapping
             };
 
             // Process each column in the schema
@@ -762,18 +919,15 @@ namespace HTADataImport
                 cmd.Parameters.AddWithValue(kvp.Key, kvp.Value ?? DBNull.Value);
             }
 
-            return (int)cmd.ExecuteScalar()!;
+            return Convert.ToInt32(cmd.ExecuteScalar()!);
         }
 
         private void AssignClientRole(ImportResult result)
         {
             try
             {
-                if (!_clientRoleId.HasValue)
-                {
-                    result.Warnings.Add("Cannot assign Client role: Role ID not found. Please ensure a 'Client' role exists in CustomerRole table.");
-                    return;
-                }
+                // Use RoleId 6 for Client role
+                var clientRoleId = 6;
 
                 using var connection = new SqlConnection(_connectionString);
                 connection.Open();
@@ -789,10 +943,10 @@ namespace HTADataImport
                     AND m.Customer_Id IS NULL";
 
                 using var cmd = new SqlCommand(sql, connection);
-                cmd.Parameters.AddWithValue("@RoleId", _clientRoleId.Value);
+                cmd.Parameters.AddWithValue("@RoleId", clientRoleId);
                 var assigned = cmd.ExecuteNonQuery();
                 
-                Console.WriteLine($"   ✓ Assigned Client role to {assigned} customers");
+                Console.WriteLine($"   ✓ Assigned Client role (RoleId: {clientRoleId}) to {assigned} customers");
                 
                 if (assigned == 0)
                 {
@@ -906,10 +1060,58 @@ namespace HTADataImport
                     {
                         var ticketId = InsertTicket(connection, customerId, record, fileNumber);
                         
-                        // Create court history entry for initial court date
+                        // Create history entries for initial data (optional - won't fail import if tables don't exist)
                         if (ticketId > 0)
                         {
-                            InsertTicketCourtHistory(connection, ticketId, record);
+                            try
+                            {
+                                // Create court history entry for initial court date
+                                InsertTicketCourtHistory(connection, ticketId, record);
+                            }
+                            catch (Exception ex)
+                            {
+                                // Silently skip if table doesn't exist - log only once
+                                if (count == 1)
+                                {
+                                    result.Warnings.Add("TicketCourtHistory table not found - history tracking disabled. Run History_Tables_Setup.sql to enable.");
+                                }
+                            }
+                            
+                            try
+                            {
+                                // Create disposition history if disposition exists
+                                var dispositionId = GetDispositionId(record.Disposition);
+                                if (dispositionId.HasValue)
+                                {
+                                    InsertTicketDispositionHistory(connection, ticketId, dispositionId.Value, record.Disposition);
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                // Silently skip if table doesn't exist - log only once
+                                if (count == 1)
+                                {
+                                    result.Warnings.Add("TicketDispositionHistory table not found - disposition history disabled. Run History_Tables_Setup.sql to enable.");
+                                }
+                            }
+                            
+                            try
+                            {
+                                // Create offence history if offence type exists
+                                var offenceTypeId = GetOffenceTypeId(record.SectionNumber, record.OffenseWording);
+                                if (offenceTypeId.HasValue)
+                                {
+                                    InsertTicketOffenceHistory(connection, ticketId, offenceTypeId.Value, record);
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                // Silently skip if table doesn't exist - log only once
+                                if (count == 1)
+                                {
+                                    result.Warnings.Add("TicketOffenceHistory table not found - offence history disabled. Run History_Tables_Setup.sql to enable.");
+                                }
+                            }
                         }
                         
                         count++;
@@ -970,19 +1172,15 @@ namespace HTADataImport
 
         private int InsertTicket(SqlConnection connection, int customerId, HTARecord record, string fileNumber)
         {
-            // Get foreign key IDs
+            // Get foreign key IDs from master data (filtered by StoreId)
             var courtId = GetCourtLocationId(record.CourtName, record.ICON);
             var offenceTypeId = GetOffenceTypeId(record.SectionNumber, record.OffenseWording);
+            var guiltyOffenceTypeId = GetOffenceTypeId(record.GuiltyOffenseSectionId, record.GuiltyOffenseWordingId);
             var dispositionId = GetDispositionId(record.Disposition);
             var officerId = GetOrCreateOfficerId(connection, record.BadgeNumber, record.FirstName, record.LastName);
             
             // Ticket with disposition should be marked as closed (IsDone = 1)
             var isClosed = dispositionId.HasValue ? 1 : 0;
-            
-            // Parse section number if available
-            int? sectionNumber = null;
-            if (!string.IsNullOrWhiteSpace(record.SectionNumber) && int.TryParse(record.SectionNumber, out int secNum))
-                sectionNumber = secNum;
             
             // Parse officer badge
             int? officerBadge = null;
@@ -1003,6 +1201,18 @@ namespace HTADataImport
                 record.DateDisclosureReceived
             );
 
+            // Parse PTS (demerit points)
+            int? ptsOffence = null;
+            if (!string.IsNullOrWhiteSpace(record.OffensePoints) && int.TryParse(record.OffensePoints, out int pts))
+                ptsOffence = pts;
+
+            // Build GuiltySpeedInfo from guilty speeding fields
+            string? guiltySpeedInfo = null;
+            if (!string.IsNullOrWhiteSpace(record.GuiltySpeedingGoing) || !string.IsNullOrWhiteSpace(record.GuiltySpeedingInA))
+            {
+                guiltySpeedInfo = $"{record.GuiltySpeedingGoing ?? "0"} in a {record.GuiltySpeedingInA ?? "0"}";
+            }
+
             var sql = @"
                 INSERT INTO [Ticket] (
                     CustomerId, IconId, CourtId, 
@@ -1010,12 +1220,14 @@ namespace HTADataImport
                     OffenceDate, DateEntered, DateRetained,
                     CourtDate, CourtRoom, CourtTime,
                     SectionNumber, Wording, OfficerId, OfficerBadge,
+                    GuiltySectionNumber, GuiltyWording, GuiltySpeedInfo, PtsOffence,
                     Fee, FineToPay, Tax, Total, TotalPaid, Balance,
                     Guarantee, Disposition, Notes, SpecialInstructions,
                     DateOfRequest, DateReceived, DisclosureStatus,
                     StatusKey, IsImported,
                     Deleted, ClientWantsToAttend, InterpreterNeeded, IsAccident,
-                    IsPreTrialNeeded, IsQueued, IsDone
+                    IsPreTrialNeeded, IsQueued, IsDone,
+                    HTATicketId, HTAClientId
                 )
                 OUTPUT INSERTED.Id
                 VALUES (
@@ -1024,12 +1236,14 @@ namespace HTADataImport
                     @OffenceDate, @DateEntered, @DateRetained,
                     @CourtDate, @CourtRoom, @CourtTime,
                     @SectionNumber, @Wording, @OfficerId, @OfficerBadge,
+                    @GuiltySectionNumber, @GuiltyWording, @GuiltySpeedInfo, @PtsOffence,
                     @Fee, @FineToPay, @Tax, @Total, @TotalPaid, @Balance,
                     @Guarantee, @Disposition, @Notes, @SpecialInstructions,
                     @DateOfRequest, @DateReceived, @DisclosureStatus,
                     'Imported', 1,
                     0, 0, 0, 0,
-                    0, 0, @IsClosed
+                    0, 0, @IsClosed,
+                    @HTATicketId, @HTAClientId
                 )";
 
             using var cmd = new SqlCommand(sql, connection);
@@ -1054,11 +1268,17 @@ namespace HTADataImport
             cmd.Parameters.AddWithValue("@CourtRoom", (object?)record.Rm ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@CourtTime", (object?)courtTime ?? DBNull.Value);
             
-            // Offence details
-            cmd.Parameters.AddWithValue("@SectionNumber", (object?)sectionNumber ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@Wording", (object?)offenceTypeId ?? DBNull.Value);
+            // Offence details - All four fields link to OffenceType table by ID (filtered by StoreId)
+            cmd.Parameters.AddWithValue("@SectionNumber", (object?)offenceTypeId ?? DBNull.Value);  // Links to OffenceType table
+            cmd.Parameters.AddWithValue("@Wording", (object?)offenceTypeId ?? DBNull.Value);  // Links to OffenceType table
             cmd.Parameters.AddWithValue("@OfficerId", (object?)officerId ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@OfficerBadge", (object?)officerBadge ?? DBNull.Value);
+            
+            // Guilty offence details - Both fields link to OffenceType table by ID (filtered by StoreId)
+            cmd.Parameters.AddWithValue("@GuiltySectionNumber", (object?)guiltyOffenceTypeId ?? DBNull.Value);  // Links to OffenceType table
+            cmd.Parameters.AddWithValue("@GuiltyWording", (object?)guiltyOffenceTypeId ?? DBNull.Value);  // Links to OffenceType table
+            cmd.Parameters.AddWithValue("@GuiltySpeedInfo", (object?)guiltySpeedInfo ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@PtsOffence", (object?)ptsOffence ?? DBNull.Value);
             
             // Financial information - Fee, Tax (GST), Total
             var feeAmount = ParseDecimal(record.Fee);
@@ -1072,9 +1292,9 @@ namespace HTADataImport
             cmd.Parameters.AddWithValue("@TotalPaid", ParseDecimal(record.Paid));  // Amount paid
             cmd.Parameters.AddWithValue("@Balance", ParseDecimal(record.Balance));  // Balance remaining
             
-            // Additional info
+            // Disposition info
             cmd.Parameters.AddWithValue("@Guarantee", (object?)record.Guarantee ?? DBNull.Value);
-            cmd.Parameters.AddWithValue("@Disposition", (object?)dispositionId ?? DBNull.Value);  // Disposition ID from lookup
+            cmd.Parameters.AddWithValue("@Disposition", (object?)dispositionId ?? DBNull.Value);  // Links to Disposition table
             cmd.Parameters.AddWithValue("@Notes", (object?)CombineNotes(record.Notes, record.TicketNotes) ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@SpecialInstructions", (object?)record.SpecialInstructions ?? DBNull.Value);
             
@@ -1085,9 +1305,13 @@ namespace HTADataImport
             
             // Ticket status - mark as closed if has disposition
             cmd.Parameters.AddWithValue("@IsClosed", isClosed);
+            
+            // Original Garner IDs for future mapping
+            cmd.Parameters.AddWithValue("@HTATicketId", (object?)record.HTATicketId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@HTAClientId", (object?)record.HTAClientId ?? DBNull.Value);
 
             var ticketId = cmd.ExecuteScalar();
-            return ticketId != null ? (int)ticketId : 0;
+            return ticketId != null ? Convert.ToInt32(ticketId) : 0;
         }
 
         private void InsertTicketCourtHistory(SqlConnection connection, int ticketId, HTARecord record)
@@ -1135,6 +1359,67 @@ namespace HTADataImport
             cmd.Parameters.AddWithValue("@InterpreterNeeded", interpreterNeeded);
             cmd.Parameters.AddWithValue("@InterpreterLanguage", interpreterNeeded ? (object?)record.Language : DBNull.Value);
             cmd.Parameters.AddWithValue("@Notes", DBNull.Value);
+            cmd.Parameters.AddWithValue("@CreatedOnUtc", DateTime.UtcNow);
+
+            cmd.ExecuteNonQuery();
+        }
+
+        private void InsertTicketDispositionHistory(SqlConnection connection, int ticketId, int dispositionId, string? dispositionName)
+        {
+            var sql = @"
+                INSERT INTO [TicketDispositionHistory] (
+                    TicketId, DispositionId, DispositionName,
+                    ChangedBy, CreatedOnUtc
+                )
+                VALUES (
+                    @TicketId, @DispositionId, @DispositionName,
+                    @ChangedBy, @CreatedOnUtc
+                )";
+
+            using var cmd = new SqlCommand(sql, connection);
+            
+            cmd.Parameters.AddWithValue("@TicketId", ticketId);
+            cmd.Parameters.AddWithValue("@DispositionId", dispositionId);
+            cmd.Parameters.AddWithValue("@DispositionName", (object?)dispositionName ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@ChangedBy", "HTA Data Import");
+            cmd.Parameters.AddWithValue("@CreatedOnUtc", DateTime.UtcNow);
+
+            cmd.ExecuteNonQuery();
+        }
+
+        private void InsertTicketOffenceHistory(SqlConnection connection, int ticketId, int offenceTypeId, HTARecord record)
+        {
+            // Parse speeding details
+            int? speedingGoing = null;
+            int? speedingInA = null;
+            
+            if (!string.IsNullOrWhiteSpace(record.SpeedingGoing) && int.TryParse(record.SpeedingGoing, out int going))
+                speedingGoing = going;
+                
+            if (!string.IsNullOrWhiteSpace(record.SpeedingInA) && int.TryParse(record.SpeedingInA, out int inA))
+                speedingInA = inA;
+
+            var sql = @"
+                INSERT INTO [TicketOffenceHistory] (
+                    TicketId, OffenceTypeId, OffenceName,
+                    SectionNumber, SpeedingGoing, SpeedingInA,
+                    ChangedBy, CreatedOnUtc
+                )
+                VALUES (
+                    @TicketId, @OffenceTypeId, @OffenceName,
+                    @SectionNumber, @SpeedingGoing, @SpeedingInA,
+                    @ChangedBy, @CreatedOnUtc
+                )";
+
+            using var cmd = new SqlCommand(sql, connection);
+            
+            cmd.Parameters.AddWithValue("@TicketId", ticketId);
+            cmd.Parameters.AddWithValue("@OffenceTypeId", offenceTypeId);
+            cmd.Parameters.AddWithValue("@OffenceName", (object?)record.OffenseWording ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@SectionNumber", (object?)record.SectionNumber ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@SpeedingGoing", (object?)speedingGoing ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@SpeedingInA", (object?)speedingInA ?? DBNull.Value);
+            cmd.Parameters.AddWithValue("@ChangedBy", "HTA Data Import");
             cmd.Parameters.AddWithValue("@CreatedOnUtc", DateTime.UtcNow);
 
             cmd.ExecuteNonQuery();
