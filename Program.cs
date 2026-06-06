@@ -49,6 +49,20 @@ namespace HTADataImport
                 Console.WriteLine($"Store ID: {config.StoreId}");
                 Console.WriteLine($"Firm Name: {config.FirmName}");
                 Console.WriteLine($"Dry Run Mode: {(config.DryRun ? "YES (No changes will be made)" : "NO (Changes WILL be applied)")}");
+                Console.WriteLine($"Import Mode: {GetImportMode(config)}");
+                if (config.MaxTickets.HasValue)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"Ticket Limit: {config.MaxTickets.Value} (for testing)");
+                    Console.ForegroundColor = ConsoleColor.Gray;
+                }
+                if (config.ClientIdFilter != null && config.ClientIdFilter.Count > 0)
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    Console.WriteLine($"Client Filter: {config.ClientIdFilter.Count} specific client(s)");
+                    Console.ForegroundColor = ConsoleColor.Gray;
+                }
+                Console.WriteLine($"Batch Size: {config.BatchSize} (for performance)");
                 Console.ResetColor();
                 Console.WriteLine();
 
@@ -272,7 +286,18 @@ namespace HTADataImport
             }
 
             // Create importer
-            var importer = new HTADataImporter(config.ConnectionString, config.StoreId, config.FirmName, config.FilterCsvPath, config.DryRun);
+            var importer = new HTADataImporter(
+                connectionString: config.ConnectionString, 
+                storeId: config.StoreId, 
+                firmName: config.FirmName, 
+                filterCsvPath: config.FilterCsvPath, 
+                dryRun: config.DryRun, 
+                maxTickets: config.MaxTickets,
+                clientIdFilter: config.ClientIdFilter,
+                importCustomers: config.ImportCustomers,
+                importTickets: config.ImportTickets,
+                batchSize: config.BatchSize
+            );
             
             // Run import
             Console.WriteLine("\nStarting import...\n");
@@ -478,6 +503,18 @@ namespace HTADataImport
             
             return string.Join(";", masked);
         }
+
+        private static string GetImportMode(AppSettings config)
+        {
+            if (config.ImportCustomers && config.ImportTickets)
+                return "Customers + Tickets";
+            else if (config.ImportCustomers)
+                return "Customers Only";
+            else if (config.ImportTickets)
+                return "Tickets Only";
+            else
+                return "None (Invalid Configuration)";
+        }
     }
 
     public class AppSettings
@@ -487,5 +524,10 @@ namespace HTADataImport
         public string FirmName { get; set; } = "HTA Import";
         public string? FilterCsvPath { get; set; } = null;
         public bool DryRun { get; set; } = true;
+        public int? MaxTickets { get; set; } = null;  // Limit number of tickets to import (null = no limit)
+        public List<string>? ClientIdFilter { get; set; } = null;  // Filter by specific pkClientID values
+        public bool ImportCustomers { get; set; } = true;  // Whether to import customers
+        public bool ImportTickets { get; set; } = true;  // Whether to import tickets
+        public int BatchSize { get; set; } = 100;  // Batch size for bulk operations (for performance)
     }
 }
