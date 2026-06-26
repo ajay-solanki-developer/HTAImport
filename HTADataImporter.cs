@@ -1404,6 +1404,16 @@ namespace HTADataImport
 
             int count = 0;
             int skipped = 0;
+            int duplicatesSkipped = 0;
+            
+            // Load all existing HTATicketIds upfront for fast duplicate checking
+            HashSet<string> existingTicketIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!_dryRun)
+            {
+                Console.WriteLine($"   Loading existing tickets for duplicate detection...");
+                existingTicketIds = LoadExistingHTATicketIds(connection);
+                Console.WriteLine($"   Found {existingTicketIds.Count} existing tickets in database");
+            }
             
             // Sort records by CustomerTicketNumber (entry order) then IntakeDate
             var sortedRecords = records
@@ -1433,6 +1443,17 @@ namespace HTADataImport
                 if (!customerIds.TryGetValue(record.HTAClientId.Trim(), out int customerId))
                 {
                     skipped++;
+                    continue;
+                }
+
+                // Skip if ticket already exists (check by HTATicketId)
+                if (!_dryRun && !string.IsNullOrWhiteSpace(record.HTATicketId) && existingTicketIds.Contains(record.HTATicketId.Trim()))
+                {
+                    duplicatesSkipped++;
+                    if (duplicatesSkipped % 1000 == 0)
+                    {
+                        Console.WriteLine($"   Skipped {duplicatesSkipped} duplicate tickets...");
+                    }
                     continue;
                 }
 
@@ -1495,6 +1516,11 @@ namespace HTADataImport
             }
 
             result.TicketsImported = count;
+            if (duplicatesSkipped > 0)
+            {
+                Console.WriteLine($"   ⓘ Skipped {duplicatesSkipped} tickets (already imported)");
+                result.Warnings.Add($"Skipped {duplicatesSkipped} tickets (already imported)");
+            }
             if (skipped > 0)
             {
                 result.Warnings.Add($"Skipped {skipped} tickets without matching customers");
@@ -1553,6 +1579,27 @@ namespace HTADataImport
                     }
                 }
             }
+        }
+
+        private HashSet<string> LoadExistingHTATicketIds(SqlConnection connection)
+        {
+            var existingIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            
+            var sql = "SELECT HTATicketId FROM [Ticket] WHERE HTATicketId IS NOT NULL";
+            using var cmd = new SqlCommand(sql, connection);
+            using var reader = cmd.ExecuteReader();
+            
+            while (reader.Read())
+            {
+                // HTATicketId is stored as INT in database, convert to string
+                if (!reader.IsDBNull(0))
+                {
+                    var htaTicketId = reader.GetInt32(0).ToString();
+                    existingIds.Add(htaTicketId);
+                }
+            }
+            
+            return existingIds;
         }
 
         private string GenerateFileNumber(HTARecord record, Dictionary<string, int> fileNumberCounters)

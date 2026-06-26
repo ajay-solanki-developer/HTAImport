@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("HTADataImport")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+fae37da85af75ba327cc6b02fba2357d954f0a82")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+afc562f07ad1bd94bc5068c27d0168bc5f2df227")]
 [assembly: System.Reflection.AssemblyProductAttribute("HTADataImport")]
 [assembly: System.Reflection.AssemblyTitleAttribute("HTADataImport")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

@@ -21,8 +21,8 @@ namespace HTADataImport
 
         public HTAMasterDataSetup(
             string connectionString,
-            string sourceDatabaseName = "LegalSharkDB",
-            int storeId = 9,
+            string sourceDatabaseName = "LegalSharkDB24Jun2026",
+            int storeId = 8,
             bool dryRun = true,
             bool clearExistingStoreMasterData = false,
             bool clearGlobalDispositionData = false)
